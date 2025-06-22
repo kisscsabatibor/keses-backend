@@ -1,0 +1,6 @@
+- type: web
+  name: keses-backend
+  env: node
+  plan: free
+  buildCommand: npm install
+  startCommand: npm start
