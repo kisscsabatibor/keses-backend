@@ -2,7 +2,11 @@ const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
 const app = express();
-app.use(cors());
+app.use(
+  cors({
+    origin: ['https://vonatkovetes-classic.onrender.com'],
+  })
+);
 
 let cachedData = null;
 let cacheTimestamp = 0;
@@ -122,6 +126,8 @@ async function fetchVehiclePositions() {
         position.route = trip.trip.tripGeometry.points;
         position.start = trip.trip.stoptimes[0].stop.name;
         position.timetable = timetable;
+        delete position.vehicleId;
+        delete position.trip.gtfsId;
       }
     });
   });
