@@ -1,33 +1,30 @@
 const express = require('express');
-const axios = require('axios');
 const cors = require('cors');
+const { GraphQLClient, gql } = require('graphql-request');
+
 const app = express();
-app.use(
-  cors({
-    origin: ['https://vonatkovetes-classic.onrender.com'],
-  })
-);
+app.use(cors());
 
-let cachedData = null;
-let cacheTimestamp = 0;
-const CACHE_DURATION_MS = 20 * 1000;
+const GRAPHQL_ENDPOINT = 'https://emma.mav.hu//otp2-backend/otp/routers/default/index/graphql';
+const client = new GraphQLClient(GRAPHQL_ENDPOINT, {
+  headers: { 'Content-Type': 'application/json' },
+});
 
-const VEHICLE_POSITIONS_QUERY = `
+let cachedTrainData = null;
+let cacheTrainTimestamp = 0;
+let cachedBusData = null;
+let cacheBusTimestamp = 0;
+const CACHE_DURATION_MS = 30000;
+const TRAIN_POSITIONS_QUERY = gql`
   query {
-    vehiclePositions(
-      swLat: 45.74,
-      swLon: 16.11,
-      neLat: 48.58,
-      neLon: 22.90,
-      modes: [RAIL, RAIL_REPLACEMENT_BUS, SUBURBAN_RAILWAY, TRAMTRAIN]
-    ) {
+    vehiclePositions(swLat: 45.74, swLon: 16.11, neLat: 48.58, neLon: 22.90, modes: [RAIL, RAIL_REPLACEMENT_BUS, SUBURBAN_RAILWAY, TRAMTRAIN]) {
       vehicleId
       lat
       lon
       speed
       heading
       trip {
-      gtfsId
+        gtfsId
         tripHeadsign
         tripShortName
       }
@@ -35,118 +32,135 @@ const VEHICLE_POSITIONS_QUERY = `
   }
 `;
 
-function getAxiosOptions(query) {
-  return {
-    method: 'POST',
-    url: 'https://emma.mav.hu//otp2-backend/otp/routers/default/index/graphql',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    data: {
-      query,
-      variables: {},
-    },
-    decompress: true,
-  };
-}
+const BUS_POSITIONS_QUERY = gql`
+  query {
+    vehiclePositions(swLat: 45.74, swLon: 16.11, neLat: 48.58, neLon: 22.90, modes: [COACH]) {
+      vehicleId
+      lat
+      lon
+      speed
+      heading
+      trip {
+        gtfsId
+        tripHeadsign
+        tripShortName
+      }
+    }
+  }
+`;
 
-function formatTimeFromSeconds(secondsSinceMidnight) {
-  const date = new Date(secondsSinceMidnight * 1000);
-  const hours = date.getUTCHours().toString().padStart(2, '0');
-  const minutes = date.getUTCMinutes().toString().padStart(2, '0');
-  return `${hours}:${minutes}`;
-}
-
-function buildTripQuery(tripId) {
-  const serviceDay = new Date().toISOString().split('T')[0];
-  return {
-    query: `
-        {
-          trip(id: "${tripId}", serviceDay: "${serviceDay}") {
-            id: gtfsId
-            tripGeometry{
-              points
-            }
-            stoptimes {
-            arrivalDelay
-            departureDelay
-            scheduledArrival
-            realtimeArrival
-            scheduledDeparture
-            realtimeDeparture
-            stop{
-              name
-            }
-          }
-          }
+const buildTripQuery = (tripId, serviceDay) => gql`
+  {
+    trip(id: "${tripId}", serviceDay: "${serviceDay}") {
+      id: gtfsId
+      tripGeometry {
+        points
+      }
+      stoptimes {
+        arrivalDelay
+        departureDelay
+        scheduledArrival
+        realtimeArrival
+        scheduledDeparture
+        realtimeDeparture
+        stop {
+          name
         }
-      `,
-    variables: {},
-  };
+      }
+    }
+  }
+`;
+
+function formatTimeFromSeconds(seconds) {
+  const date = new Date(seconds * 1000);
+  return date.toISOString().substr(11, 5);
 }
 
-async function fetchTripDetailsForVehicles(vehicles) {
-  const tripQueries = vehicles.map(id => {
-    const data = buildTripQuery(id);
-    return axios.post('https://emma.mav.hu//otp2-backend/otp/routers/default/index/graphql', data, {
-      headers: {
-        'Content-Type': 'application/json',
-      },
-    });
+async function fetchTripDetailsForVehicles(tripIds) {
+  const serviceDay = new Date().toISOString().split('T')[0];
+  const promises = tripIds.map(async id => {
+    const data = await client.request(buildTripQuery(id, serviceDay));
+    return data.trip;
   });
-
-  const responses = await Promise.all(tripQueries.filter(Boolean));
-  return responses.map(r => r.data.data);
+  return Promise.all(promises);
 }
 
-async function fetchVehiclePositions() {
-  const options = getAxiosOptions(VEHICLE_POSITIONS_QUERY);
-  const response = await axios(options);
-  const positions = response.data.data.vehiclePositions || [];
+async function fetchVehiclePositions(isTrainRequest) {
+  let data = null;
+  if (isTrainRequest) {
+    data = await client.request(TRAIN_POSITIONS_QUERY);
+  } else {
+    data = await client.request(BUS_POSITIONS_QUERY);
+  }
+  const positions = data.vehiclePositions || [];
 
   const tripIds = positions.map(p => p.trip?.gtfsId || p.trip?.tripId || p.trip?.id).filter(Boolean);
+
   const tripDetails = await fetchTripDetailsForVehicles(tripIds);
+
   tripDetails.forEach(trip => {
     positions.forEach(position => {
-      if (position.trip.gtfsId == trip.trip.id) {
-        const stoptimes = trip.trip.stoptimes;
-        const delay = stoptimes[stoptimes.length - 1];
-        const delayInMinutes = Math.max(delay?.arrivalDelay, delay?.departureDelay) / 60;
-        const timetable = [];
-        stoptimes.forEach(stoptime => {
-          let stop = {};
-          stop.place = stoptime.stop.name;
-          stop.expectedArrival = formatTimeFromSeconds(stoptime.scheduledArrival);
-          stop.realArrival = formatTimeFromSeconds(stoptime.realtimeArrival);
-          stop.expectedDeparture = formatTimeFromSeconds(stoptime.scheduledDeparture);
-          stop.realDeparture = formatTimeFromSeconds(stoptime.realtimeDeparture);
-          timetable.push(stop);
+      if (position.trip?.gtfsId === trip.id) {
+        const stoptimes = trip.stoptimes;
+        const lastStop = stoptimes[stoptimes.length - 1];
+        const delayInMinutes = Math.max(lastStop?.arrivalDelay, lastStop?.departureDelay) / 60;
+
+        const timetable = stoptimes.map(s => ({
+          place: s.stop.name,
+          expectedArrival: formatTimeFromSeconds(s.scheduledArrival),
+          realArrival: formatTimeFromSeconds(s.realtimeArrival),
+          expectedDeparture: formatTimeFromSeconds(s.scheduledDeparture),
+          realDeparture: formatTimeFromSeconds(s.realtimeDeparture),
+        }));
+
+        Object.assign(position, {
+          delay: delayInMinutes,
+          route: trip.tripGeometry.points,
+          start: stoptimes[0]?.stop.name,
+          timetable,
         });
-        position.delay = delayInMinutes;
-        position.route = trip.trip.tripGeometry.points;
-        position.start = trip.trip.stoptimes[0].stop.name;
-        position.timetable = timetable;
+
         delete position.vehicleId;
         delete position.trip.gtfsId;
       }
     });
   });
+
   return positions;
 }
 
-app.get('/fetch-data', async (req, res) => {
+app.get('/fetch-train-data', async (req, res) => {
   const now = Date.now();
-  if (cachedData && now - cacheTimestamp < CACHE_DURATION_MS) {
-    return res.json(cachedData);
+
+  if (cachedTrainData && now - cacheTrainTimestamp < CACHE_DURATION_MS) {
+    return res.json(cachedTrainData);
   }
 
   try {
-    const data = await fetchVehiclePositions();
-    cachedData = data;
-    cacheTimestamp = now;
+    const data = await fetchVehiclePositions(true);
+    cachedTrainData = data;
+    cacheTrainTimestamp = now;
     res.json(data);
   } catch (error) {
-    console.error('Error fetching data:', error.response?.data || error.message);
+    console.error('Error fetching data:', error);
+    res.status(500).json({ error: 'Failed to fetch data' });
+  }
+});
+
+app.get('/fetch-bus-data', async (req, res) => {
+  const now = Date.now();
+
+  if (cachedBusData && now - cacheBusTimestamp < CACHE_DURATION_MS) {
+    return res.json(cachedTrainData);
+  }
+
+  try {
+    const data = await fetchVehiclePositions(false);
+    cachedBusData = data;
+    cacheBusTimestamp = now;
+    res.json(data);
+  } catch (error) {
+    console.error('Error fetching data:', error);
     res.status(500).json({ error: 'Failed to fetch data' });
   }
 });
