@@ -84,6 +84,11 @@ function formatTimeFromSeconds(seconds) {
   return date.toISOString().substr(11, 5);
 }
 
+function getSecondsFromMidnight() {
+  const now = new Date();
+  return now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+}
+
 async function fetchTripDetailsForVehicles(tripIds) {
   const serviceDay = new Date().toISOString().split('T')[0];
   const promises = tripIds.map(async id => {
@@ -143,11 +148,14 @@ async function fetchVehiclePositions(isTrainRequest) {
 
         delete position.vehicleId;
         delete position.trip.gtfsId;
+        if (trip.stoptimes[trip.stoptimes.length - 1].realtimeDeparture - getSecondsFromMidnight() <= -60 * 5) {
+          position.notRelevant = true;
+        }
       }
     });
   });
-
-  return positions;
+  const positionsFiltered = positions.filter(p => !p.notRelevant);
+  return positionsFiltered;
 }
 
 app.get('/fetch-train-data', async (req, res) => {
