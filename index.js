@@ -180,7 +180,7 @@ app.get('/fetch-bus-data', async (req, res) => {
   const now = Date.now();
 
   if (cachedBusData && now - cacheBusTimestamp < CACHE_DURATION_MS) {
-    return res.json(cachedTrainData);
+    return res.json(cachedBusData);
   }
 
   try {
