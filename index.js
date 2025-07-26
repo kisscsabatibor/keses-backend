@@ -32,22 +32,30 @@ const TRAIN_POSITIONS_QUERY = gql`
   }
 `;
 
-const BUS_POSITIONS_QUERY = gql`
-  query {
-    vehiclePositions(swLat: 45.74, swLon: 16.11, neLat: 48.58, neLon: 22.90, modes: [COACH]) {
-      vehicleId
-      lat
-      lon
-      speed
-      heading
-      trip {
-        gtfsId
-        tripHeadsign
-        tripShortName
+function createBusPositionsQuery(swLat, swLon, neLat, neLon) {
+  return gql`
+    query {
+      vehiclePositions(
+        swLat: ${swLat}, 
+        swLon: ${swLon}, 
+        neLat: ${neLat}, 
+        neLon: ${neLon}, 
+        modes: [COACH]
+      ) {
+        vehicleId
+        lat
+        lon
+        speed
+        heading
+        trip {
+          gtfsId
+          tripHeadsign
+          tripShortName
+        }
       }
     }
-  }
-`;
+  `;
+}
 
 const buildTripQuery = (tripId, serviceDay) => gql`
   {
@@ -86,11 +94,24 @@ async function fetchTripDetailsForVehicles(tripIds) {
 }
 
 async function fetchVehiclePositions(isTrainRequest) {
-  let data = null;
+  let data = {};
   if (isTrainRequest) {
     data = await client.request(TRAIN_POSITIONS_QUERY);
   } else {
-    data = await client.request(BUS_POSITIONS_QUERY);
+    const rects = [
+      { swLat: 45.74, swLon: 16.11, neLat: 47.16, neLon: 19.505 },
+      { swLat: 45.74, swLon: 19.505, neLat: 47.16, neLon: 22.9 },
+      { swLat: 47.16, swLon: 16.11, neLat: 48.58, neLon: 19.505 },
+      { swLat: 47.16, swLon: 19.505, neLat: 48.58, neLon: 22.9 },
+    ];
+
+    const allData = await Promise.all(
+      rects.map(({ swLat, swLon, neLat, neLon }) => client.request(createBusPositionsQuery(swLat, swLon, neLat, neLon)))
+    );
+
+    const vehiclePositions = allData.flatMap(result => result.vehiclePositions);
+
+    data.vehiclePositions = vehiclePositions;
   }
   const positions = data.vehiclePositions || [];
 
