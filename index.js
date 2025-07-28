@@ -1,21 +1,18 @@
 const express = require('express');
 const cors = require('cors');
-const { GraphQLClient, gql } = require('graphql-request');
 
 const app = express();
 app.use(cors());
 
 const GRAPHQL_ENDPOINT = 'https://emma.mav.hu//otp2-backend/otp/routers/default/index/graphql';
-const client = new GraphQLClient(GRAPHQL_ENDPOINT, {
-  headers: { 'Content-Type': 'application/json' },
-});
 
 let cachedTrainData = null;
 let cacheTrainTimestamp = 0;
 let cachedBusData = null;
 let cacheBusTimestamp = 0;
 const CACHE_DURATION_MS = 30000;
-const TRAIN_POSITIONS_QUERY = gql`
+
+const TRAIN_POSITIONS_QUERY = `
   query {
     vehiclePositions(swLat: 45.74, swLon: 16.11, neLat: 48.58, neLon: 22.90, modes: [RAIL, RAIL_REPLACEMENT_BUS, SUBURBAN_RAILWAY, TRAMTRAIN]) {
       vehicleId
@@ -33,7 +30,7 @@ const TRAIN_POSITIONS_QUERY = gql`
 `;
 
 function createBusPositionsQuery(swLat, swLon, neLat, neLon) {
-  return gql`
+  return `
     query {
       vehiclePositions(
         swLat: ${swLat}, 
@@ -57,7 +54,7 @@ function createBusPositionsQuery(swLat, swLon, neLat, neLon) {
   `;
 }
 
-const buildTripQuery = (tripId, serviceDay) => gql`
+const buildTripQuery = (tripId, serviceDay) => `
   {
     trip(id: "${tripId}", serviceDay: "${serviceDay}") {
       id: gtfsId
@@ -79,6 +76,17 @@ const buildTripQuery = (tripId, serviceDay) => gql`
   }
 `;
 
+async function graphqlFetch(query) {
+  const response = await fetch(GRAPHQL_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+  });
+  const result = await response.json();
+  if (result.errors) throw new Error(JSON.stringify(result.errors));
+  return result.data;
+}
+
 function formatTimeFromSeconds(seconds) {
   const date = new Date(seconds * 1000);
   return date.toISOString().substr(11, 5);
@@ -92,7 +100,7 @@ function getSecondsFromMidnight() {
 async function fetchTripDetailsForVehicles(tripIds) {
   const serviceDay = new Date().toISOString().split('T')[0];
   const promises = tripIds.map(async id => {
-    const data = await client.request(buildTripQuery(id, serviceDay));
+    const data = await graphqlFetch(buildTripQuery(id, serviceDay));
     return data.trip;
   });
   return Promise.all(promises);
@@ -101,7 +109,7 @@ async function fetchTripDetailsForVehicles(tripIds) {
 async function fetchVehiclePositions(isTrainRequest) {
   let data = {};
   if (isTrainRequest) {
-    data = await client.request(TRAIN_POSITIONS_QUERY);
+    data = await graphqlFetch(TRAIN_POSITIONS_QUERY);
   } else {
     const rects = [
       { swLat: 45.74, swLon: 16.11, neLat: 47.16, neLon: 19.505 },
@@ -111,13 +119,13 @@ async function fetchVehiclePositions(isTrainRequest) {
     ];
 
     const allData = await Promise.all(
-      rects.map(({ swLat, swLon, neLat, neLon }) => client.request(createBusPositionsQuery(swLat, swLon, neLat, neLon)))
+      rects.map(({ swLat, swLon, neLat, neLon }) => graphqlFetch(createBusPositionsQuery(swLat, swLon, neLat, neLon)))
     );
 
     const vehiclePositions = allData.flatMap(result => result.vehiclePositions);
-
     data.vehiclePositions = vehiclePositions;
   }
+
   const positions = data.vehiclePositions || [];
 
   const tripIds = positions.map(p => p.trip?.gtfsId || p.trip?.tripId || p.trip?.id).filter(Boolean);
@@ -154,6 +162,7 @@ async function fetchVehiclePositions(isTrainRequest) {
       }
     });
   });
+
   const positionsFiltered = positions.filter(p => !p.notRelevant);
   return positionsFiltered;
 }
