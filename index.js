@@ -1,10 +1,15 @@
 const express = require('express');
 const cors = require('cors');
 
+const { HttpsProxyAgent } = require('https-proxy-agent');
+
 const app = express();
 app.use(cors());
 
 const GRAPHQL_ENDPOINT = 'https://emma.mav.hu//otp2-backend/otp/routers/default/index/graphql';
+const PROXY_URL = 'https://89.58.45.94:43476';
+
+const agent = new HttpsProxyAgent(PROXY_URL);
 
 let cachedTrainData = null;
 let cacheTrainTimestamp = 0;
@@ -79,9 +84,29 @@ const buildTripQuery = (tripId, serviceDay) => `
 async function graphqlFetch(query) {
   const response = await fetch(GRAPHQL_ENDPOINT, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/114.0.0.0 Safari/537.36',
+      Origin: 'https://emma.mav.hu',
+      Referer: 'https://emma.mav.hu/',
+    },
     body: JSON.stringify({ query }),
+    agent,
   });
+
+  const contentType = response.headers.get('content-type') || '';
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`HTTP ${response.status}: ${text}`);
+  }
+
+  if (!contentType.includes('application/json')) {
+    const text = await response.text();
+    throw new Error(`Expected JSON but got: ${text}`);
+  }
+
   const result = await response.json();
   if (result.errors) throw new Error(JSON.stringify(result.errors));
   return result.data;
@@ -99,11 +124,18 @@ function getSecondsFromMidnight() {
 
 async function fetchTripDetailsForVehicles(tripIds) {
   const serviceDay = new Date().toISOString().split('T')[0];
-  const promises = tripIds.map(async id => {
-    const data = await graphqlFetch(buildTripQuery(id, serviceDay));
-    return data.trip;
-  });
-  return Promise.all(promises);
+
+  const results = [];
+  for (const id of tripIds) {
+    try {
+      const data = await graphqlFetch(buildTripQuery(id, serviceDay));
+      results.push(data.trip);
+      await new Promise(resolve => setTimeout(resolve, 100)); // optional rate-limiting delay
+    } catch (err) {
+      console.warn(`Trip fetch failed for ${id}:`, err.message);
+    }
+  }
+  return results;
 }
 
 async function fetchVehiclePositions(isTrainRequest) {
@@ -119,7 +151,12 @@ async function fetchVehiclePositions(isTrainRequest) {
     ];
 
     const allData = await Promise.all(
-      rects.map(({ swLat, swLon, neLat, neLon }) => graphqlFetch(createBusPositionsQuery(swLat, swLon, neLat, neLon)))
+      rects.map(({ swLat, swLon, neLat, neLon }) =>
+        graphqlFetch(createBusPositionsQuery(swLat, swLon, neLat, neLon)).catch(err => {
+          console.warn('Bus query failed:', err.message);
+          return { vehiclePositions: [] };
+        })
+      )
     );
 
     const vehiclePositions = allData.flatMap(result => result.vehiclePositions);
@@ -127,9 +164,7 @@ async function fetchVehiclePositions(isTrainRequest) {
   }
 
   const positions = data.vehiclePositions || [];
-
   const tripIds = positions.map(p => p.trip?.gtfsId || p.trip?.tripId || p.trip?.id).filter(Boolean);
-
   const tripDetails = await fetchTripDetailsForVehicles(tripIds);
 
   tripDetails.forEach(trip => {
@@ -156,20 +191,18 @@ async function fetchVehiclePositions(isTrainRequest) {
 
         delete position.vehicleId;
         delete position.trip.gtfsId;
-        if (trip.stoptimes[trip.stoptimes.length - 1].realtimeDeparture - getSecondsFromMidnight() <= -60 * 5) {
+        if (lastStop.realtimeDeparture - getSecondsFromMidnight() <= -60 * 5) {
           position.notRelevant = true;
         }
       }
     });
   });
 
-  const positionsFiltered = positions.filter(p => !p.notRelevant);
-  return positionsFiltered;
+  return positions.filter(p => !p.notRelevant);
 }
 
 app.get('/fetch-train-data', async (req, res) => {
   const now = Date.now();
-
   if (cachedTrainData && now - cacheTrainTimestamp < CACHE_DURATION_MS) {
     return res.json(cachedTrainData);
   }
@@ -180,14 +213,13 @@ app.get('/fetch-train-data', async (req, res) => {
     cacheTrainTimestamp = now;
     res.json(data);
   } catch (error) {
-    console.error('Error fetching data:', error);
-    res.status(500).json({ error: 'Failed to fetch data' });
+    console.error('Error fetching train data:', error);
+    res.status(500).json({ error: 'Failed to fetch train data' });
   }
 });
 
 app.get('/fetch-bus-data', async (req, res) => {
   const now = Date.now();
-
   if (cachedBusData && now - cacheBusTimestamp < CACHE_DURATION_MS) {
     return res.json(cachedBusData);
   }
@@ -198,8 +230,8 @@ app.get('/fetch-bus-data', async (req, res) => {
     cacheBusTimestamp = now;
     res.json(data);
   } catch (error) {
-    console.error('Error fetching data:', error);
-    res.status(500).json({ error: 'Failed to fetch data' });
+    console.error('Error fetching bus data:', error);
+    res.status(500).json({ error: 'Failed to fetch bus data' });
   }
 });
 
